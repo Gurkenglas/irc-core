@@ -1,4 +1,4 @@
-{-# Language OverloadedStrings #-}
+{-# Language OverloadedStrings, LambdaCase #-}
 
 {-|
 Module      : Client.EventLoop
@@ -162,17 +162,16 @@ doNetworkLine networkId time line =
               time' = case view msgServerTime raw of
                 Nothing -> time
                 Just stime -> utcToZonedTime (zonedTimeZone time) stime
-              msg = ClientMessage
-                { _msgTime = time'
-                , _msgNetwork = network
-                , _msgBody = IrcBody irc
-                }
               myNick = view csNick cs
               target = msgTarget myNick irc
-
+          
           -- record messages *before* applying the changes
+          recordIrcMessage network target $ ClientMessage
+            { _msgTime = time'
+            , _msgNetwork = network
+            , _msgBody = IrcBody irc
+            }
           msgs <- applyMessageToClientState time irc networkId cs
-            $ recordIrcMessage network target msg st
 
           traverse_ (sendMsg cs) msgs
 
