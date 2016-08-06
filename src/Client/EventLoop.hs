@@ -1,4 +1,4 @@
-{-# Language OverloadedStrings, LambdaCase #-}
+{-# Language OverloadedStrings #-}
 
 {-|
 Module      : Client.EventLoop
@@ -95,13 +95,13 @@ eventLoop = do
 
   event <- getEvent
   case event of
-    TimerEvent networkId action  -> doTimerEvent networkId action st
-    VtyEvent vtyEvent         -> doVtyEvent vtyEvent st
+    TimerEvent networkId action  -> doTimerEvent networkId action
+    VtyEvent vtyEvent         -> doVtyEvent vtyEvent
     NetworkEvent networkEvent ->
       case networkEvent of
-        NetworkLine  network time line -> doNetworkLine network time line st
-        NetworkError network time ex   -> doNetworkError network time ex st
-        NetworkClose network time      -> doNetworkClose network time st
+        NetworkLine  network time line -> doNetworkLine network time line
+        NetworkError network time ex   -> doNetworkError network time ex
+        NetworkClose network time      -> doNetworkClose network time
 
 beep :: Vty -> IO ()
 beep vty = liftIO $ outputByteBuffer (outputIface vty) "\BEL"
@@ -180,7 +180,7 @@ doNetworkLine networkId time line =
 doVtyEvent :: Event -> ClientState -> IO ()
 doVtyEvent (EvKey k modifier) = doKey k modifier
 doVtyEvent (EvResize{}) = do -- ignore event parameters due to raw TChan use
-  let vty = view clientVty st
+  vty <- use clientVty
   liftIO $ refresh vty
   (w,h) <- liftIO $ displayBounds (outputIface vty)
   clientWidth .= w
