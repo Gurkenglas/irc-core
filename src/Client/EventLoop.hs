@@ -84,113 +84,109 @@ getEvent st =
 -- | Apply this function to an initial 'ClientState' to launch the client.
 eventLoop :: (MonadState ClientState m, MonadIO m) => m ()
 eventLoop = do
+  bell <- use clientBell
+  
   clientTick
-  do let st1 = clientTick st0
-         vty = view clientVty st
-         (pic, st) = clientPicture st1
+  vty <- use clientVty
+  pic <- clientPicture
+  
+  when bell $ beep vty
+  update vty pic
 
-     when (view clientBell st0) (beep vty)
-     update vty pic
-
-     event <- getEvent st
-     case event of
-       TimerEvent networkId action  -> doTimerEvent networkId action st
-       VtyEvent vtyEvent         -> doVtyEvent vtyEvent st
-       NetworkEvent networkEvent ->
-         case networkEvent of
-           NetworkLine  network time line -> doNetworkLine network time line st
-           NetworkError network time ex   -> doNetworkError network time ex st
-           NetworkClose network time      -> doNetworkClose network time st
+  event <- getEvent
+  case event of
+    TimerEvent networkId action  -> doTimerEvent networkId action st
+    VtyEvent vtyEvent         -> doVtyEvent vtyEvent st
+    NetworkEvent networkEvent ->
+      case networkEvent of
+        NetworkLine  network time line -> doNetworkLine network time line st
+        NetworkError network time ex   -> doNetworkError network time ex st
+        NetworkClose network time      -> doNetworkClose network time st
 
 beep :: Vty -> IO ()
-beep vty = outputByteBuffer (outputIface vty) "\BEL"
+beep vty = liftIO $ outputByteBuffer (outputIface vty) "\BEL"
 
 -- | Respond to a network connection closing normally.
 doNetworkClose ::
+  (MonadState ClientState m, MonadIO m) =>
   NetworkId {- ^ finished network -} ->
   ZonedTime {- ^ current time     -} ->
-  ClientState -> IO ()
-doNetworkClose networkId time st =
-  let (cs,st') = removeNetwork networkId st
-      msg = ClientMessage
-              { _msgTime    = time
-              , _msgNetwork = view csNetwork cs
-              , _msgBody    = ExitBody
-              }
-  in eventLoop $ recordNetworkMessage msg st'
+  m ()
+doNetworkClose networkId time = do
+  cs <- removeNetwork networkId
+  recordNetworkMessage $ ClientMessage
+    { _msgTime    = time
+    , _msgNetwork = view csNetwork cs
+    , _msgBody    = ExitBody
+    }
 
 
 -- | Respond to a network connection closing abnormally.
 doNetworkError ::
+  (MonadState ClientState m, MonadIO m) =>
   NetworkId {- ^ failed network -} ->
   ZonedTime {- ^ current time   -} ->
   SomeException {- ^ termination reason -} ->
-  ClientState -> IO ()
-doNetworkError networkId time ex st =
-  let (cs,st') = removeNetwork networkId st
-      msg = ClientMessage
-              { _msgTime    = time
-              , _msgNetwork = view csNetwork cs
-              , _msgBody    = ErrorBody (show ex)
-              }
-  in eventLoop $ recordNetworkMessage msg st'
+  m ()
+doNetworkError networkId time ex =
+  cs <- removeNetwork networkId
+  recordNetworkMessage $ ClientMessage
+    { _msgTime    = time
+    , _msgNetwork = view csNetwork cs
+    , _msgBody    = ErrorBody (show ex)
+    }
 
 
 -- | Respond to an IRC protocol line. This will parse the message, updated the
 -- relevant connection state and update the UI buffers.
 doNetworkLine ::
+  (MonadState ClientState m, MonadIO m) =>
   NetworkId {- ^ Network ID of message -} ->
   ZonedTime {- ^ current time          -} ->
   ByteString {- ^ Raw IRC message without newlines -} ->
-  ClientState -> IO ()
-doNetworkLine networkId time line st =
-  case view (clientConnections . at networkId) st of
+  m ()
+doNetworkLine networkId time line =
+  use (clientConnections . at networkId) >>= \case
     Nothing -> error "doNetworkLine: Network missing"
     Just cs ->
       let network = view csNetwork cs in
       case parseRawIrcMsg (asUtf8 line) of
-        Nothing ->
-          do let msg = ClientMessage
-                        { _msgTime = time
-                        , _msgNetwork = network
-                        , _msgBody = ErrorBody ("Malformed message: " ++ show line)
-                        }
-             eventLoop (recordNetworkMessage msg st)
+        Nothing -> recordNetworkMessage $ ClientMessage
+          { _msgTime = time
+          , _msgNetwork = network
+          , _msgBody = ErrorBody ("Malformed message: " ++ show line)
+          }
 
-        Just raw ->
-          do let irc = cookIrcMsg raw
-                 time' = case view msgServerTime raw of
-                           Nothing -> time
-                           Just stime -> utcToZonedTime (zonedTimeZone time) stime
-                 msg = ClientMessage
-                         { _msgTime = time'
-                         , _msgNetwork = network
-                         , _msgBody = IrcBody irc
-                         }
-                 myNick = view csNick cs
-                 target = msgTarget myNick irc
+        Just raw -> do
+          let irc = cookIrcMsg raw
+              time' = case view msgServerTime raw of
+                Nothing -> time
+                Just stime -> utcToZonedTime (zonedTimeZone time) stime
+              msg = ClientMessage
+                { _msgTime = time'
+                , _msgNetwork = network
+                , _msgBody = IrcBody irc
+                }
+              myNick = view csNick cs
+              target = msgTarget myNick irc
 
-             -- record messages *before* applying the changes
-             let (msgs, st')
-                    = applyMessageToClientState time irc networkId cs
-                    $ recordIrcMessage network target msg st
+          -- record messages *before* applying the changes
+          msgs <- applyMessageToClientState time irc networkId cs
+            $ recordIrcMessage network target msg st
 
-             traverse_ (sendMsg cs) msgs
-             eventLoop st'
+          traverse_ (sendMsg cs) msgs
 
 
 -- | Respond to a VTY event.
 doVtyEvent :: Event -> ClientState -> IO ()
-doVtyEvent vtyEvent st =
-  case vtyEvent of
-    EvKey k modifier -> doKey k modifier st
-    EvResize{} -> -- ignore event parameters due to raw TChan use
-      do let vty = view clientVty st
-         refresh vty
-         (w,h) <- displayBounds (outputIface vty)
-         eventLoop $ set clientWidth w
-                   $ set clientHeight h st
-    _                -> eventLoop st
+doVtyEvent (EvKey k modifier) = doKey k modifier
+doVtyEvent (EvResize{}) = do -- ignore event parameters due to raw TChan use
+  let vty = view clientVty st
+  liftIO $ refresh vty
+  (w,h) <- liftIO $ displayBounds (outputIface vty)
+  clientWidth .= w
+  clientHeight .= h
+doVtyEvent _ = pure ()
 
 
 -- | Map keyboard inputs to actions in the client
